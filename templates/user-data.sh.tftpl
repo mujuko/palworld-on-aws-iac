@@ -1,0 +1,156 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf install -y docker python3 xfsprogs
+systemctl enable --now docker
+
+device="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_id}"
+for attempt in $(seq 1 120); do
+  if [ -b "$device" ]; then
+    break
+  fi
+  sleep 5
+done
+
+if [ ! -b "$device" ]; then
+  echo "Persistent EBS volume was not attached within 10 minutes" >&2
+  exit 1
+fi
+
+if ! blkid "$device" >/dev/null 2>&1; then
+  mkfs.xfs "$device"
+fi
+
+mkdir -p /srv/palworld
+volume_uuid=$(blkid -s UUID -o value "$device")
+if ! grep -q "UUID=$volume_uuid " /etc/fstab; then
+  printf 'UUID=%s /srv/palworld xfs defaults,nofail 0 2\n' "$volume_uuid" >> /etc/fstab
+fi
+mountpoint -q /srv/palworld || mount /srv/palworld
+mkdir -p /srv/palworld/Saved
+
+install -d -m 0755 /opt/palworld
+cat >/opt/palworld/helper.sh <<'HELPER'
+#!/bin/sh
+sudo chown -R user:usergroup /pal/Package/Pal/Saved
+exec /bin/sh /pal/Package/PalServer.sh "$@"
+HELPER
+chmod 0755 /opt/palworld/helper.sh
+
+docker pull "${palworld_image}"
+
+cat >/usr/local/sbin/configure-palworld <<'CONFIGURE'
+#!/bin/bash
+set -euo pipefail
+
+settings_dir="/srv/palworld/Saved/Config/LinuxServer"
+settings_file="$settings_dir/PalWorldSettings.ini"
+secret_file=$(mktemp)
+cleanup() {
+  rm -f "$secret_file"
+}
+trap cleanup EXIT
+
+if [ ! -s "$settings_file" ]; then
+  docker run --rm --user 0:0 --entrypoint /bin/sh \
+    -v /srv/palworld/Saved:/pal/Package/Pal/Saved \
+    ${palworld_image} \
+    -c 'mkdir -p /pal/Package/Pal/Saved/Config/LinuxServer && cp /pal/Package/DefaultPalWorldSettings.ini /pal/Package/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini'
+fi
+
+chmod 0600 "$secret_file"
+aws secretsmanager get-secret-value \
+  --secret-id '${palworld_secret_arn}' \
+  --query SecretString \
+  --output text >"$secret_file"
+
+python3 - "$settings_file" "$secret_file" <<'PYTHON'
+import json
+import os
+import re
+import sys
+import tempfile
+
+settings_path, secret_path = sys.argv[1:]
+with open(secret_path, encoding="utf-8") as source:
+    secret = json.load(source)
+with open(settings_path, encoding="utf-8") as source:
+    settings = source.read()
+
+for key in ("ServerPassword", "AdminPassword"):
+    value = secret.get(key)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"Secrets Manager value is missing {key}")
+    if any(character in value for character in ('"', '\\', '\n', '\r')):
+        raise SystemExit(f"{key} contains a character that cannot be written safely")
+    pattern = re.compile(rf'{key}="[^"]*"')
+    if not pattern.search(settings):
+        raise SystemExit(f"{key} was not found in PalWorldSettings.ini")
+    settings = pattern.sub(lambda _: f'{key}="{value}"', settings, count=1)
+
+directory = os.path.dirname(settings_path)
+descriptor, temporary_path = tempfile.mkstemp(dir=directory)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+        target.write(settings)
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, settings_path)
+finally:
+    if os.path.exists(temporary_path):
+        os.unlink(temporary_path)
+PYTHON
+CONFIGURE
+chmod 0750 /usr/local/sbin/configure-palworld
+
+cat >/etc/systemd/system/palworld.service <<'UNIT'
+[Unit]
+Description=Palworld dedicated server
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+RequiresMountsFor=/srv/palworld
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f palworld-server
+ExecStartPre=/usr/local/sbin/configure-palworld
+ExecStart=/usr/bin/docker run --rm --name palworld-server --stop-timeout 120 --log-opt max-size=20m --log-opt max-file=3 --entrypoint /pal/helper.sh -p ${game_port}:${game_port}/udp -v /opt/palworld/helper.sh:/pal/helper.sh:ro -v /srv/palworld/Saved:/pal/Package/Pal/Saved ${palworld_image} -port=${game_port} -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS
+ExecStop=/usr/bin/docker stop -t 120 palworld-server
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=150
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat >/usr/local/sbin/backup-palworld <<'BACKUP'
+#!/bin/bash
+set -euo pipefail
+
+was_active=0
+archive=""
+cleanup() {
+  if [ -n "$archive" ]; then
+    rm -f "$archive"
+  fi
+  if [ "$was_active" -eq 1 ]; then
+    systemctl start palworld
+  fi
+}
+trap cleanup EXIT
+
+if systemctl is-active --quiet palworld; then
+  was_active=1
+  systemctl stop palworld
+fi
+
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+archive="/var/tmp/palworld-saved-$timestamp.tar.gz"
+tar -C /srv/palworld -czf "$archive" Saved
+aws s3 cp "$archive" "s3://${backup_bucket}/backups/$(basename "$archive")" --sse AES256
+BACKUP
+chmod 0750 /usr/local/sbin/backup-palworld
+
+systemctl daemon-reload
+systemctl enable --now palworld.service

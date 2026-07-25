@@ -1,0 +1,15 @@
+aws_region = "ap-northeast-1"
+name       = "my-palworld-server"
+# game_port  = 8211
+
+# Replace these documentation-only addresses with each player's current public
+# IPv4 address followed by /32. Do not use 0.0.0.0/0 for a private server.
+allowed_cidrs = [
+  # "203.0.113.10/32",
+  # "198.51.100.24/32",
+]
+
+# Keep this false for the first apply. After storing the initial passwords in
+# Secrets Manager, set it to true to create the EC2 server and Elastic IP.
+# Set it back to false when you want to remove compute while preserving saves.
+server_enabled = false
