@@ -152,5 +152,104 @@ aws s3 cp "$archive" "s3://${backup_bucket}/backups/$(basename "$archive")" --ss
 BACKUP
 chmod 0750 /usr/local/sbin/backup-palworld
 
+cat >/usr/local/sbin/restore-palworld <<'RESTORE'
+#!/bin/bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ] || [[ "$1" != s3://* ]]; then
+  echo "Usage: restore-palworld s3://bucket/key.tar.gz" >&2
+  exit 2
+fi
+
+source_uri="$1"
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+archive="/var/tmp/palworld-restore-$timestamp.tar.gz"
+safety_archive="/var/tmp/palworld-pre-restore-$timestamp.tar.gz"
+safety_uri="s3://${backup_bucket}/backups/palworld-pre-restore-$timestamp.tar.gz"
+staging="/srv/palworld/.restore-$timestamp"
+previous="/srv/palworld/.Saved-before-restore-$timestamp"
+was_active=0
+previous_moved=0
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  rm -f "$archive" "$safety_archive"
+  rm -rf "$staging"
+
+  if [ "$status" -ne 0 ] && [ "$previous_moved" -eq 1 ]; then
+    rm -rf /srv/palworld/Saved
+    if [ -d "$previous" ]; then
+      mv "$previous" /srv/palworld/Saved
+    fi
+  fi
+
+  if [ "$was_active" -eq 1 ]; then
+    systemctl start palworld || true
+  fi
+
+  if [ "$status" -eq 0 ]; then
+    rm -rf "$previous"
+  fi
+
+  exit "$status"
+}
+trap cleanup EXIT
+
+aws s3 cp "$source_uri" "$archive"
+mkdir -p "$staging"
+
+python3 - "$archive" "$staging" <<'PYTHON'
+import pathlib
+import sys
+import tarfile
+
+archive_path, destination = sys.argv[1:]
+with tarfile.open(archive_path, "r:gz") as source:
+    members = source.getmembers()
+    if not members:
+        raise SystemExit("The backup archive is empty")
+
+    for member in members:
+        path = pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or not path.parts or path.parts[0] != "Saved" or ".." in path.parts:
+            raise SystemExit(f"Unsafe or unexpected archive member: {member.name}")
+        if not (member.isfile() or member.isdir()):
+            raise SystemExit(f"Unsupported archive member type: {member.name}")
+
+    source.extractall(destination, members=members)
+PYTHON
+
+if [ ! -d "$staging/Saved" ]; then
+  echo "The backup archive does not contain a Saved directory" >&2
+  exit 1
+fi
+
+if systemctl is-active --quiet palworld; then
+  was_active=1
+  systemctl stop palworld
+fi
+
+mkdir -p /srv/palworld/Saved
+tar -C /srv/palworld -czf "$safety_archive" Saved
+aws s3 cp "$safety_archive" "$safety_uri" --sse AES256
+
+mv /srv/palworld/Saved "$previous"
+previous_moved=1
+mv "$staging/Saved" /srv/palworld/Saved
+
+if [ "$was_active" -eq 1 ]; then
+  systemctl start palworld
+  was_active=0
+fi
+
+rm -rf "$previous"
+previous_moved=0
+
+echo "Restored Palworld save data from $source_uri"
+echo "Safety backup: $safety_uri"
+RESTORE
+chmod 0750 /usr/local/sbin/restore-palworld
+
 systemctl daemon-reload
 systemctl enable --now palworld.service

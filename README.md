@@ -157,7 +157,17 @@ aws s3 ls "s3://$bucket/backups/"
 aws s3 cp "s3://$bucket/backups/<archive-name>.tar.gz" .
 ```
 
-#### e. パスワードを変更する
+#### e. バックアップをインポートする
+
+インポート中はゲームサーバーが一時的に停止し、現在のセーブデータが置き換わります。参加者がいないことを確認してから、エクスポート済みのアーカイブを指定します。
+
+```powershell
+./scripts/Restore-PalworldBackup.ps1 './palworld-saved-<timestamp>.tar.gz'
+```
+
+確認メッセージで `RESTORE` と入力すると処理を開始します。スクリプトはアーカイブをS3へアップロードし、Systems Manager経由でEC2上の復元処理を実行します。置き換え前の `Saved` 全体もS3へ退避します。展開またはPalworldの再起動に失敗した場合は、元の `Saved` へ戻して再起動を試みます。
+
+#### f. パスワードを変更する
 
 参加者がいないことを確認してから、初回登録と同じスクリプトを実行します。
 
@@ -167,7 +177,7 @@ aws s3 cp "s3://$bucket/backups/<archive-name>.tar.gz" .
 
 スクリプトはSecrets Managerへ新しい値を登録し、EC2が存在する場合はSystems Manager経由でPalworldを再起動して反映します。EC2の再作成や `tofu apply` は不要です。サーバーを撤去中の場合はSecrets Managerだけを更新し、次回起動時に反映します。
 
-#### f. 公式イメージを更新する
+#### g. 公式イメージを更新する
 
 更新前に手動バックアップを取得します。公式イメージの新しい固定タグを確認し、 `palworld_image` を変更して適用します。
 
@@ -178,7 +188,7 @@ tofu apply image-update.tfplan
 
 EC2は再作成されますが、セーブ用EBSは保持されます。
 
-#### g. EC2を撤去してセーブを残す
+#### h. EC2を撤去してセーブを残す
 
 遊ばない期間は `terraform.tfvars` の値を変更します。
 
@@ -309,6 +319,28 @@ OpenTofuのstateは紛失しない場所で管理してください。チーム�
 - [Amazon S3料金](https://aws.amazon.com/jp/s3/pricing/)
 
 ## ツールの説明
+
+### Restore-PalworldBackup.ps1
+
+ローカルへエクスポートした `.tar.gz` をS3へアップロードし、Systems Manager経由でセーブ用EBSへ復元するPowerShellスクリプトです。アーカイブのパスを位置引数で指定します。
+
+```powershell
+./scripts/Restore-PalworldBackup.ps1 './palworld-saved-20260726T120000Z.tar.gz'
+```
+
+出力例:
+
+```text
+現在のセーブデータを置き換えます。続行するにはRESTOREと入力してください: RESTORE
+Uploaded the backup archive to s3://my-palworld-save-backups/backups/imports/palworld-import-00000000-0000-0000-0000-000000000000.tar.gz
+Restored Palworld save data from s3://my-palworld-save-backups/backups/imports/palworld-import-00000000-0000-0000-0000-000000000000.tar.gz
+Safety backup: s3://my-palworld-save-backups/backups/palworld-pre-restore-20260726T130000Z.tar.gz
+Palworld save data restore completed.
+```
+
+自動化で確認入力を省略する場合だけ `-Force` を指定できます。指定時も復元前の安全用バックアップは作成されます。
+
+復元元のアーカイブと復元直前の安全用バックアップはS3に残ります。アーカイブにはルートディレクトリとして `Saved` が必要です。絶対パス、親ディレクトリ参照、シンボリックリンクなどを含むアーカイブはEC2上で拒否します。
 
 ### Set-PalworldCredentials.ps1
 

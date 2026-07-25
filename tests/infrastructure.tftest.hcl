@@ -38,6 +38,11 @@ run "recommended_server_shape" {
     condition     = one(aws_security_group.server.ingress).from_port == var.game_port && one(aws_security_group.server.ingress).to_port == var.game_port && one(aws_security_group.server.ingress).protocol == "udp"
     error_message = "The security group must expose only the configured UDP game port."
   }
+
+  assert {
+    condition     = strcontains(aws_instance.server[0].user_data, "/usr/local/sbin/restore-palworld")
+    error_message = "The server must install the save restore command."
+  }
 }
 
 run "compute_can_be_removed" {
