@@ -73,7 +73,7 @@ variable "root_volume_size_gib" {
 variable "palworld_image" {
   description = "Pinned official Palworld dedicated-server container image."
   type        = string
-  default     = "ghcr.io/pocketpairjp/palserver:v1.0.1.100619"
+  default     = "ghcr.io/pocketpairjp/palserver:v1.0.5.102999"
 
   validation {
     condition     = startswith(var.palworld_image, "ghcr.io/pocketpairjp/palserver:") && !endswith(var.palworld_image, ":latest")
