@@ -13,3 +13,13 @@ allowed_cidrs = [
 # Secrets Manager, set it to true to create the EC2 server and Elastic IP.
 # Set it back to false when you want to remove compute while preserving saves.
 server_enabled = false
+
+# PalWorldSettings.ini OptionSettings values applied at every server start.
+# Setting names and allowed values: https://docs.palworldgame.com/ja/settings-and-operation/configuration/
+# Changing these values replaces the EC2 instance. Saves and the IP address are kept.
+# palworld_settings = {
+#   DeathPenalty             = "None"
+#   BlockRespawnTime         = 1
+#   ExpRate                  = 1.2
+#   ItemCorruptionMultiplier = 0.8
+# }

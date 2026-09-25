@@ -257,6 +257,7 @@ resource "aws_instance" "server" {
     game_port           = var.game_port
     palworld_image      = var.palworld_image
     palworld_secret_arn = aws_secretsmanager_secret.palworld.arn
+    palworld_settings   = jsonencode(var.palworld_settings)
     volume_id           = replace(aws_ebs_volume.saves.id, "-", "")
   })
 

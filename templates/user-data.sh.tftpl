@@ -37,6 +37,11 @@ exec /bin/sh /pal/Package/PalServer.sh "$@"
 HELPER
 chmod 0755 /opt/palworld/helper.sh
 
+cat >/opt/palworld/settings.json <<'SETTINGS'
+${palworld_settings}
+SETTINGS
+chmod 0644 /opt/palworld/settings.json
+
 docker pull "${palworld_image}"
 
 cat >/usr/local/sbin/configure-palworld <<'CONFIGURE'
@@ -46,8 +51,9 @@ set -euo pipefail
 settings_dir="/srv/palworld/Saved/Config/LinuxServer"
 settings_file="$settings_dir/PalWorldSettings.ini"
 secret_file=$(mktemp)
+defaults_file=$(mktemp)
 cleanup() {
-  rm -f "$secret_file"
+  rm -f "$secret_file" "$defaults_file"
 }
 trap cleanup EXIT
 
@@ -58,24 +64,62 @@ if [ ! -s "$settings_file" ]; then
     -c 'mkdir -p /pal/Package/Pal/Saved/Config/LinuxServer && cp /pal/Package/DefaultPalWorldSettings.ini /pal/Package/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini'
 fi
 
+docker run --rm --entrypoint /bin/cat ${palworld_image} \
+  /pal/Package/DefaultPalWorldSettings.ini >"$defaults_file"
+
 chmod 0600 "$secret_file"
 aws secretsmanager get-secret-value \
   --secret-id '${palworld_secret_arn}' \
   --query SecretString \
   --output text >"$secret_file"
 
-python3 - "$settings_file" "$secret_file" <<'PYTHON'
+python3 - "$settings_file" "$secret_file" /opt/palworld/settings.json "$defaults_file" <<'PYTHON'
 import json
 import os
 import re
 import sys
 import tempfile
 
-settings_path, secret_path = sys.argv[1:]
+settings_path, secret_path, overrides_path, defaults_path = sys.argv[1:]
 with open(secret_path, encoding="utf-8") as source:
     secret = json.load(source)
 with open(settings_path, encoding="utf-8") as source:
     settings = source.read()
+with open(overrides_path, encoding="utf-8") as source:
+    overrides = json.load(source)
+with open(defaults_path, encoding="utf-8") as source:
+    defaults = source.read()
+
+option_line = re.compile(r"^OptionSettings=\((.*)\)(?=\r?$)", re.MULTILINE)
+option_item = re.compile(r'([A-Za-z0-9_]+)=("[^"]*"|\([^()]*\)|[^,()"]*)(?:,|$)')
+
+
+def parse_options(text, name):
+    line = option_line.search(text)
+    if not line:
+        raise SystemExit(f"OptionSettings was not found in {name}")
+    body = line.group(1)
+    options = {}
+    position = 0
+    while position < len(body):
+        item = option_item.match(body, position)
+        if not item:
+            raise SystemExit(f"Could not parse OptionSettings in {name} near {body[position:position + 40]!r}")
+        options[item.group(1)] = item.group(2)
+        position = item.end()
+    return line, options
+
+
+def format_value(key, value, reference):
+    if reference.startswith('"'):
+        return f'"{value}"'
+    if reference.startswith("("):
+        if not re.fullmatch(r'\([^()"]*\)', value):
+            raise SystemExit(f"{key} must be a parenthesized list such as (Steam,Xbox)")
+        return value
+    if re.search(r'[,()"\s]', value):
+        raise SystemExit(f"{key} contains a character that cannot be written without quotes")
+    return value
 
 for key in ("ServerPassword", "AdminPassword"):
     value = secret.get(key)
@@ -87,6 +131,17 @@ for key in ("ServerPassword", "AdminPassword"):
     if not pattern.search(settings):
         raise SystemExit(f"{key} was not found in PalWorldSettings.ini")
     settings = pattern.sub(lambda _: f'{key}="{value}"', settings, count=1)
+
+if overrides:
+    line, options = parse_options(settings, "PalWorldSettings.ini")
+    _, default_options = parse_options(defaults, "DefaultPalWorldSettings.ini")
+    for key, value in overrides.items():
+        reference = options.get(key, default_options.get(key))
+        if reference is None:
+            raise SystemExit(f"{key} is not a PalWorldSettings.ini setting in this server version")
+        options[key] = format_value(key, value, reference)
+    body = ",".join(f"{key}={value}" for key, value in options.items())
+    settings = settings[:line.start()] + f"OptionSettings=({body})" + settings[line.end():]
 
 directory = os.path.dirname(settings_path)
 descriptor, temporary_path = tempfile.mkstemp(dir=directory)

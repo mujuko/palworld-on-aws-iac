@@ -62,3 +62,31 @@ run "compute_can_be_removed" {
     error_message = "Persistent saves, protected backups, and the credential container must remain in the plan."
   }
 }
+
+run "game_settings_are_declarative" {
+  command = plan
+
+  variables {
+    palworld_settings = {
+      DeathPenalty = "None"
+      ExpRate      = 1.2
+    }
+  }
+
+  assert {
+    condition     = strcontains(aws_instance.server[0].user_data, jsonencode({ DeathPenalty = "None", ExpRate = "1.2" }))
+    error_message = "The server must receive the declared PalWorldSettings.ini values."
+  }
+}
+
+run "passwords_stay_out_of_game_settings" {
+  command = plan
+
+  variables {
+    palworld_settings = {
+      AdminPassword = "not-here"
+    }
+  }
+
+  expect_failures = [var.palworld_settings]
+}
