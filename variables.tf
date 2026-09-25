@@ -70,6 +70,27 @@ variable "root_volume_size_gib" {
   }
 }
 
+variable "palworld_settings" {
+  description = "PalWorldSettings.ini OptionSettings values applied at every server start, keyed by setting name. Write values without the ini quotes, for example { DeathPenalty = \"None\", ExpRate = 1.2 }."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for key in keys(var.palworld_settings) : can(regex("^[A-Za-z][A-Za-z0-9_]*$", key))])
+    error_message = "palworld_settings keys must be PalWorldSettings.ini setting names such as ExpRate."
+  }
+
+  validation {
+    condition     = length(setintersection(keys(var.palworld_settings), ["ServerPassword", "AdminPassword"])) == 0
+    error_message = "ServerPassword and AdminPassword are stored in Secrets Manager. Use scripts/Set-PalworldCredentials.ps1 instead."
+  }
+
+  validation {
+    condition     = alltrue([for value in values(var.palworld_settings) : !can(regex("[\"\\\\\r\n]", value))])
+    error_message = "palworld_settings values may not contain double quotes, backslashes, or line breaks."
+  }
+}
+
 variable "palworld_image" {
   description = "Pinned official Palworld dedicated-server container image."
   type        = string

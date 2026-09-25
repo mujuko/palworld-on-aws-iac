@@ -127,7 +127,29 @@ sudo docker logs --tail 100 palworld-server
 
 #### b. ゲーム設定を変更する
 
-設定ファイルはセーブデータと同じ永続EBS上にあります。EC2再作成時に残るものは [構成と永続化](#構成と永続化) を参照してください。
+`terraform.tfvars` の `palworld_settings` に、変更したい設定だけを記載します。設定名と値は [Palworld Server Guide:設定](https://docs.palworldgame.com/ja/settings-and-operation/configuration/) を参照してください。値はiniのダブルクォートを付けずに書きます。
+
+```hcl
+palworld_settings = {
+  DeathPenalty             = "None"
+  BlockRespawnTime         = 1
+  ExpRate                  = 1.2
+  ItemCorruptionMultiplier = 0.8
+}
+```
+
+参加者がいないことを確認し、手動バックアップを取得してから適用します。
+
+```powershell
+tofu plan -out settings.tfplan
+tofu apply settings.tfplan
+```
+
+設定を変更するとEC2は再作成されますが、セーブ用EBSとElastic IPは保持されます。記載した値はPalworldの起動のたびに `PalWorldSettings.ini` へ上書きされるため、ゲーム内やファイルの直接編集で同じ設定を変えても元に戻ります。記載していない設定は変更されません。
+
+公式イメージの `DefaultPalWorldSettings.ini` に存在しない設定名を記載した場合は、誤記とみなしてPalworldを起動しません。 `sudo journalctl -u palworld` で原因を確認してください。 `ServerPassword` と `AdminPassword` は記載できません。 [パスワードを変更する](#f-パスワードを変更する) を参照してください。
+
+`palworld_settings` で管理しない設定は、セーブデータと同じ永続EBS上の設定ファイルを直接編集することもできます。EC2再作成時に残るものは [構成と永続化](#構成と永続化) を参照してください。
 
 ```text
 /srv/palworld/Saved/Config/LinuxServer/PalWorldSettings.ini
